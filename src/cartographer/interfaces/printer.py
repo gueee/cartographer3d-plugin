@@ -182,8 +182,13 @@ class Toolhead(Protocol):
         """Returns currently applied gcode offset for the z axis."""
         ...
 
-    def z_probing_move(self, endstop: Endstop, *, speed: float) -> float:
-        """Starts probing move towards the given endstop."""
+    def z_probing_move(self, endstop: Endstop, *, speed: float, z_floor: float | None = None) -> float:
+        """Starts probing move towards the given endstop.
+
+        If ``z_floor`` is provided, the downward probing-move target is clamped to be
+        no lower than ``z_floor`` (still bounded by the axis minimum), limiting how far
+        the toolhead can travel past an expected trigger position.
+        """
         ...
 
     def z_home_end(self, endstop: Endstop) -> None:
