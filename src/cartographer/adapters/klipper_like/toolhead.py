@@ -105,13 +105,15 @@ class KlipperLikeToolhead(Toolhead, ABC):
 
     @override
     @reraise_from_klipper
-    def z_probing_move(self, endstop: Endstop, *, speed: float) -> float:
+    def z_probing_move(self, endstop: Endstop, *, speed: float, z_floor: float | None = None) -> float:
         klipper_endstop = KlipperEndstop(self.mcu, endstop)
         self.wait_moves()
         z_min, _ = self.get_axis_limits("z")
 
         pos = self.toolhead.get_position()[:]
-        pos[2] = z_min
+        # Clamp the downward target to z_floor (if given) so the move cannot travel
+        # past it, while never going below the axis minimum.
+        pos[2] = z_min if z_floor is None else max(z_min, z_floor)
 
         epos = self.printer.lookup_object("homing").probing_move(klipper_endstop, pos, speed)
         return epos[2]
