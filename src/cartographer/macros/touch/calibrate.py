@@ -20,6 +20,7 @@ from cartographer.probe.touch_mode import (
     TouchError,
     TouchMode,
     TouchModeConfiguration,
+    TouchSafetyError,
     compute_range,
     find_best_subset,
     run_probe_sequence,
@@ -233,6 +234,17 @@ class TouchCalibrateParams:
     threshold_start: int = param("Starting threshold", default=500, min=100, key="START")
     threshold_max: int = param("Maximum threshold", default=5000, min=100, key="MAX")
     verification_samples: int = param("Verification sample count", default=10, min=3, max=20)
+    safety_margin: float = param(
+        "Maximum distance (mm) a probe may travel below the first promising contact "
+        "height before the threshold sweep is restarted",
+        default=1.0,
+        min=0.2,
+    )
+    safety_retries: int = param(
+        "Number of times the threshold sweep may be restarted after reaching the safety floor before calibration fails",
+        default=2,
+        min=0,
+    )
 
 
 @final
@@ -306,16 +318,40 @@ class TouchCalibrateMacro(Macro):
         screener = ThresholdScreener(calibration_mode, required_samples)
         verifier = ThresholdVerifier(calibration_mode)
 
-        with force_home_z(self._toolhead):
-            threshold = self._find_threshold(
-                screener,
-                verifier,
-                p.threshold_start,
-                p.threshold_max,
-                sample_range,
-                p.max_verify_range,
-                p.verification_samples,
-            )
+        # The first promising threshold locks in a contact reference and a safety floor.
+        # If a later, higher threshold probes down to that floor (it no longer triggers
+        # reliably), the sweep is restarted from the start with a fresh reference, up to
+        # safety_retries times. This prevents a runaway sweep from driving the nozzle
+        # progressively deeper into the bed.
+        threshold: int | None = None
+        attempts = p.safety_retries + 1
+        for attempt in range(attempts):
+            calibration_mode.safety_floor_z = None
+            try:
+                with force_home_z(self._toolhead):
+                    threshold = self._find_threshold(
+                        screener,
+                        verifier,
+                        calibration_mode,
+                        p.safety_margin,
+                        p.threshold_start,
+                        p.threshold_max,
+                        sample_range,
+                        p.max_verify_range,
+                        p.verification_samples,
+                    )
+                break
+            except TouchSafetyError as e:
+                if attempt + 1 >= attempts:
+                    msg = f"Touch calibration aborted by safety floor after {attempts} attempt(s): {e}"
+                    raise RuntimeError(msg) from e
+                logger.warning(
+                    "Reached safety floor (attempt %d/%d): %s. Restarting threshold sweep.",
+                    attempt + 1,
+                    attempts,
+                    e,
+                )
+        calibration_mode.safety_floor_z = None
 
         if threshold is None:
             self._log_calibration_failure(p.threshold_start, p.threshold_max)
@@ -336,6 +372,8 @@ class TouchCalibrateMacro(Macro):
         self,
         screener: ThresholdScreener,
         verifier: ThresholdVerifier,
+        calibration_mode: CalibrationTouchMode,
+        safety_margin: float,
         threshold_start: int,
         threshold_max: int,
         sample_range: float,
@@ -366,6 +404,22 @@ class TouchCalibrateMacro(Macro):
             if not screening.passed(sample_range):
                 threshold += calculate_step(threshold, screening.best_range, sample_range)
                 continue
+
+            # The first threshold that screens cleanly is our most promising contact.
+            # Record it as the reference height and set a safety floor below it so any
+            # later (higher) threshold cannot push the nozzle progressively into the bed.
+            if calibration_mode.safety_floor_z is None and screening.best_subset:
+                reference_z = float(np.median(list(screening.best_subset)))
+                floor_z = reference_z - safety_margin
+                calibration_mode.safety_floor_z = floor_z
+                logger.info(
+                    "Locking contact reference at %.4fmm (threshold %d); "
+                    "limiting further probing to %.4fmm (reference - %.2fmm).",
+                    reference_z,
+                    threshold,
+                    floor_z,
+                    safety_margin,
+                )
 
             # Phase 2: Actual touch probe verification
             verification = verifier.verify(threshold, max_verify_range, verification_samples)
@@ -439,7 +493,7 @@ class TouchCalibrateMacro(Macro):
         sample_range: float,
     ) -> None:
         """Log a screening result."""
-        status = "✓" if result.passed(sample_range) else "✗"
+        status = "\u2713" if result.passed(sample_range) else "\u2717"
         logger.info(
             "Screening %d: %s best=%smm (%d samples)",
             result.threshold,
@@ -465,7 +519,7 @@ class TouchCalibrateMacro(Macro):
         max_verify_range: float,
     ) -> None:
         """Log a verification result with touch-accuracy-style report."""
-        status = "✓" if result.passed(max_verify_range) else "✗"
+        status = "\u2713" if result.passed(max_verify_range) else "\u2717"
         medians = result.probe_medians
 
         max_value = max(medians)
