@@ -6,6 +6,7 @@ import pytest
 
 from cartographer.interfaces.configuration import Configuration, TouchModelConfiguration
 from cartographer.interfaces.printer import Mcu, Position, TemperatureStatus, Toolhead
+from cartographer.probe.touch_mode import TouchSafetyError
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -31,6 +32,34 @@ def test_probe_success(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) 
     toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
 
     assert probe.touch.perform_probe() == 0.5
+
+
+def test_probe_passes_no_safety_floor_by_default(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    toolhead.z_probing_move = mocker.Mock(return_value=0.5)
+    toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
+
+    _ = probe.touch.perform_probe()
+
+    assert toolhead.z_probing_move.mock_calls[0] == mocker.call(probe.touch, speed=mocker.ANY, z_floor=None)
+
+
+def test_probe_forwards_safety_floor(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    toolhead.z_probing_move = mocker.Mock(return_value=0.5)
+    toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
+    probe.touch.safety_floor_z = -1.0
+
+    _ = probe.touch.perform_probe()
+
+    assert toolhead.z_probing_move.mock_calls[0] == mocker.call(probe.touch, speed=mocker.ANY, z_floor=-1.0)
+
+
+def test_probe_raises_when_trigger_at_safety_floor(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    toolhead.z_probing_move = mocker.Mock(return_value=0.5)
+    toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
+    probe.touch.safety_floor_z = 0.6
+
+    with pytest.raises(TouchSafetyError, match="safety floor"):
+        _ = probe.touch.perform_probe()
 
 
 def test_probe_includes_z_offset(
