@@ -12,7 +12,7 @@ from cartographer.macros.touch.calibrate import (
     calculate_step,
     format_distance,
 )
-from cartographer.probe.touch_mode import TouchError
+from cartographer.probe.touch_mode import TouchError, TouchSafetyError
 
 # --- Fake probe for testing ---
 
@@ -54,6 +54,22 @@ class FakeCalibrationProbe:
 
 
 # --- Data classes ---
+
+
+class TestTouchSafetyError:
+    def test_is_not_a_touch_error(self):
+        # The verifier swallows TouchError as "inconsistent"; a safety abort must
+        # propagate instead so the sweep can be restarted, so it must NOT subclass it.
+        assert not issubclass(TouchSafetyError, TouchError)
+
+    def test_not_caught_by_verifier_touch_error_handling(self):
+        probe = FakeCalibrationProbe(
+            probe_results=[1.000, TouchSafetyError("safety floor")],
+        )
+        verifier = ThresholdVerifier(probe)
+
+        with pytest.raises(TouchSafetyError):
+            _ = verifier.verify(threshold=1000, max_verify_range=0.020, sample_count=5)
 
 
 class TestScreeningResult:
