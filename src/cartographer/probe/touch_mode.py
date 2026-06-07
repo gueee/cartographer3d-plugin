@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 TOUCH_ACCEL = 100
 MAX_TOUCH_TEMPERATURE_EPSILON = 2
+# Tolerance (mm) when comparing a trigger position against the safety floor.
+SAFETY_FLOOR_EPSILON = 1e-4
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,16 @@ class TouchModeConfiguration:
 
 class TouchError(RuntimeError):
     pass
+
+
+class TouchSafetyError(RuntimeError):
+    """A touch probe travelled down to the configured safety floor.
+
+    Raised when ``TouchMode.safety_floor_z`` is set and a probe triggers at or below
+    that floor, i.e. the active threshold is too high to trigger before the nozzle would
+    push past the expected contact height. Deliberately not a :class:`TouchError` so it
+    is not swallowed by the inconsistency handling during threshold calibration.
+    """
 
 
 def run_probe_sequence(
@@ -222,6 +234,10 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
 
         self.boundaries: TouchBoundaries = TouchBoundaries.from_config(config)
         self.last_z_result: float | None = None
+        # Optional lower bound (mm) for probing-move targets. When set, each probe move
+        # is clamped to this floor and a trigger at/below it raises TouchSafetyError.
+        # Left at None for normal probing; used during touch calibration.
+        self.safety_floor_z: float | None = None
 
     @override
     def get_status(self, eventtime: float) -> dict[str, object]:
@@ -268,10 +284,18 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
         with self._mcu.start_session(lambda sample: sample.time >= time):
             pass
 
+        floor = self.safety_floor_z
         try:
-            trigger_pos = self._toolhead.z_probing_move(self, speed=model.speed)
+            trigger_pos = self._toolhead.z_probing_move(self, speed=model.speed, z_floor=floor)
         finally:
             self._toolhead.set_max_accel(max_accel)
+
+        if floor is not None and trigger_pos <= floor + SAFETY_FLOOR_EPSILON:
+            msg = (
+                f"Touch reached the safety floor (trigger {trigger_pos:.4f}mm <= "
+                f"floor {floor:.4f}mm); threshold is too high to trigger reliably."
+            )
+            raise TouchSafetyError(msg)
 
         pos = self._toolhead.get_position()
         self._toolhead.move(
